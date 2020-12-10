@@ -1,81 +1,80 @@
 require('__core__/lualib/util')
+local Position = require('__stdlib__/stdlib/area/position')
+
+local event_filter = {{filter = 'name', name = 'blackhole'}}
 
 script.on_init(function()
-
-    global.blackhole = {{counter = 0, generator = {name = 'a', pos = {0, 0}}, furnace = {name = 'b', pos = {0, 0}}}}
-    global.gencounter = 1
-
-end)
-
-script.on_event(defines.events.on_cutscene_cancelled, function(event)
-    game.surfaces['nauvis'].create_entity{
-        name = 'crash-site-assembling-machine-1-repaired',
-        position = {-20, -7},
-        force = game.players[event.player_index].force
-	}
-	game.surfaces['nauvis'].create_entity{
-        name = 'crash-site-assembling-machine-1-repaired',
-        position = {-12, 2},
-        force = game.players[event.player_index].force
-    }
-end)
-
-script.on_event({defines.events.on_built_entity, defines.events.on_robot_built_entity}, function(event)
-    local E = event.created_entity
-    if E.name == 'blackhole' then
-        local Furn = game.surfaces['nauvis'].create_entity{
-            name = 'magic-furnace',
-            position = {E.position.x, E.position.y},
-            force = E.force
-        }
-
-        local newgen = util.table.deepcopy(global.blackhole[1])
-
-        -- log(serpent.block(newgen))
-
-        newgen.counter = global.gencounter
-        newgen.generator.name = E.name
-        newgen.generator.pos = E.position
-        newgen.furnace.name = Furn.name
-        newgen.furnace.pos = Furn.position
-
-        table.insert(global.blackhole, newgen)
-
-        -- log(serpent.block(newgen))
-        -- log(serpent.block(global.blackhole))
-
-        global.gencounter = global.gencounter + 1
-
+    global.blackhole = nil -- Needs on_config_changed to clean up and migrate existing
+    global.blackholes = {}
+    if remote.interfaces['freeplay'] and remote.interfaces['freeplay'].set_disable_crashsite then
+        remote.call('freeplay', 'set_disable_crashsite', true)
     end
-
 end)
+
+script.on_event(defines.events.on_player_created, function(event)
+    local player = game.get_player(event.player_index)
+    local force = player.force
+    if #force.players > 1 then return end
+
+    local intro_machine = 'crash-site-assembling-machine-1-repaired'
+    local surface = player.surface
+    local position = Position(player.position)
+    for _ = 1, 2 do
+        local from_player = position:random(5, 15)
+        local pos = surface.find_non_colliding_position(intro_machine, from_player, 10, 1, true)
+        if pos then surface.create_entity{name = intro_machine, position = pos, force = force} end
+    end
+end)
+
+local function create_furnace(entity)
+    local furnace = entity.surface.create_entity{
+        name = 'magic-furnace',
+        position = entity.position,
+        force = entity.force
+    }
+    return furnace, furnace.get_output_inventory()
+end
+
+local function on_built(event)
+    local entity = event.created_entity or event.entity
+    local furnace, output = create_furnace(entity)
+    local blackhole = {generator = entity, fuel = entity.get_fuel_inventory(), furnace = furnace, output = output}
+    global.blackholes[entity.unit_nummber] = blackhole
+end
+script.on_event(defines.events.on_built_entity, on_built, event_filter)
+script.on_event(defines.events.on_robot_built_entity, on_built, event_filter)
+script.on_event(defines.events.script_raised_built, event_filter)
+script.on_event(defines.events.script_raised_revive, event_filter)
+
+local function destroy_furnace(data, unit_number)
+    if data and data.furnace and data.furnace.valid then data.furnace.destroy() end
+    global.blackholes[unit_number] = nil
+end
+
+local function on_entity_mined(event)
+    local unit_number = event.entity.unit_number
+    local data = global.blackholes[unit_number]
+    destroy_furnace(data, unit_number)
+end
+script.on_event(defines.events.on_robot_mined_entity, on_entity_mined, event_filter)
+script.on_event(defines.events.on_player_mined_entity, on_entity_mined, event_filter)
+script.on_event(defines.events.script_raised_destroy, on_entity_mined, event_filter)
 
 script.on_nth_tick(30, function()
 
-    for _, e in pairs(global.blackhole) do
+    for unit_number, data in pairs(global.blackholes) do
+        if data.generator.valid then
+            if not data.output.valid then data.furnace, data.output = create_furnace(data.generator) end
 
-        -- log(serpent.block(e))
-        -- log(serpent.block(e.generator.pos))
-        local curgen = game.surfaces['nauvis'].find_entity('blackhole', e.generator.pos)
-        local curfurn = game.surfaces['nauvis'].find_entity('magic-furnace', e.furnace.pos)
-        if curgen ~= nil then
-            -- log(serpent.block(curgen.name))
-            -- log(serpent.block(curfurn.name))
-            if curgen.get_fuel_inventory().get_item_count() <= 5 then
-                -- log("low fuel")
-                local fuel = curfurn.get_output_inventory().get_item_count()
-                if fuel >= 1 then
-                    curgen.get_fuel_inventory().insert({name = 'blackhole-fuel', count = fuel})
-                    curfurn.get_output_inventory().clear()
+            if data.fuel.get_item_count() <= 5 then
+                local count = data.output.get_item_count()
+                if count >= 1 then
+                    data.fuel.insert({name = 'blackhole-fuel', count = count})
+                    data.output.clear()
                 end
             end
+        else
+            destroy_furnace(data, unit_number)
         end
-    end
-end)
-
-script.on_event({defines.events.on_player_mined_entity, defines.events.on_robot_mined_entity}, function(event)
-    if event.entity.name == 'blackhole' then
-        local f = game.surfaces['nauvis'].find_entity('magic-furnace', event.entity.position)
-        if f ~= nil then f.destroy() end
     end
 end)
